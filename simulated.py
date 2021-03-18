@@ -46,7 +46,7 @@ class Battery(object):
         self.charging_efficiency = charging_efficiency
         self.discharging_efficiency = discharging_efficiency
 
-class BatteryContoller1():
+class BatteryContoller_or_tools():
     step = 960
 
     def propose_state_of_charge(self,
@@ -72,10 +72,10 @@ class BatteryContoller1():
         energy = [None] * number_step
 
         for i in range(number_step):
-            if (pv_forecast[i] >= 50):
-                energy[i] = load_forecast[i] - pv_forecast[i]
-            else:
-                energy[i] = load_forecast[i]
+            #if (pv_forecast[i] >= 50):
+            energy[i] = load_forecast[i] - pv_forecast[i]
+            #else:
+                #energy[i] = load_forecast[i]
         # battery
         capacity = battery.capacity
         charging_efficiency = battery.charging_efficiency
@@ -87,28 +87,29 @@ class BatteryContoller1():
         dis_limit /= 4.
 
         # Ortools
-        #solver = pywraplp.Solver("B", pywraplp.Solver.GLOP_LINEAR_PROGRAMMING)
-        #solver = pywraplp.Solver("B", pywraplp.Solver.GLPK_LINEAR_PROGRAMMING)
-        solver = pywraplp.Solver.CreateSolver('SCIP')
+        solver = pywraplp.Solver("B", pywraplp.Solver.GLOP_LINEAR_PROGRAMMING)
 
         # Variables: all are continous
         charge = [solver.NumVar(0.0, limit, "c" + str(i)) for i in range(number_step)]
         dis_charge = [solver.NumVar(dis_limit, 0.0, "d" + str(i)) for i in range(number_step)]
         battery_power = [solver.NumVar(0.0, capacity, "b" + str(i)) for i in range(number_step + 1)]
         grid = [solver.NumVar(0.0, solver.infinity(), "g" + str(i)) for i in range(number_step)]
+        grid_s = [solver.NumVar(0.0, solver.infinity(), "g" + str(i)) for i in range(number_step)]
 
         # Objective function
         objective = solver.Objective()
         for i in range(number_step):
             objective.SetCoefficient(grid[i], price_buy[i])
-            objective.SetCoefficient(grid[i], price_buy[i] - price_sell[i])
-            objective.SetCoefficient(charge[i], price_sell[i] + price_buy[i] / 1000.)
-            objective.SetCoefficient(dis_charge[i], price_sell[i])
+            objective.SetCoefficient(grid_s[i], - price_sell[i])
+            #objective.SetCoefficient(grid[i], price_buy[i] - price_sell[i])
+            #objective.SetCoefficient(charge[i], price_sell[i] + price_buy[i] / 1000.)
+            #objective.SetCoefficient(dis_charge[i], price_sell[i])
         objective.SetMinimization()
 
         # 3 Constraints
         c_grid = [None] * number_step
         c_power = [None] * (number_step + 1)
+
         # first constraint
         c_power[0] = solver.Constraint(current, current)
         c_power[0].SetCoefficient(battery_power[0], 1)
@@ -119,17 +120,15 @@ class BatteryContoller1():
             c_grid[i].SetCoefficient(grid[i], 1)
             c_grid[i].SetCoefficient(charge[i], -1)
             c_grid[i].SetCoefficient(dis_charge[i], -1)
-
+            c_grid[i].SetCoefficient(grid_s[i], -1)
             # third constraint
             c_power[i + 1] = solver.Constraint(0, 0)
             c_power[i + 1].SetCoefficient(charge[i], charging_efficiency)
             c_power[i + 1].SetCoefficient(dis_charge[i], discharging_efficiency)
             c_power[i + 1].SetCoefficient(battery_power[i], 1)
             c_power[i + 1].SetCoefficient(battery_power[i + 1], -1)
-
         # solve the model
         solver.Solve()
-
         return battery_power[1].solution_value() / capacity
 
 
@@ -205,77 +204,12 @@ class BatteryContoller_cplex(object):
         # solve the model
         opt_model.solve()
         solution = opt_model.solution
-        # opt_model.print_solution()
-
-        if ((energy[0] < 0) & (solution.get_value(dis_charge[0]) >= 0)):
-            n = 0
-            first = -limit
-            mid = 0
-
-            sum_charge = solution.get_value(charge[0])
-            last = energy[0]
-            for n in range(1, number_step):
-                if ((energy[n] > 0) | (solution.get_value(dis_charge[n]) < 0) | (price_sell[n] != price_sell[n - 1])):
-                    break
-                last = min(last, energy[n])
-                sum_charge += solution.get_value(charge[n])
-            if (sum_charge <= 0.):
-                return solution.get_value(battery_power[1]) / capacity
-
-            def tinh(X):
-                res = 0
-                for i in range(n):
-                    res += min(limit, max(-X - energy[i], 0.))
-                if (res >= sum_charge): return True
-                return False
-
-            last = 2 - last
-            # binary search
-            while (last - first > 1):
-                mid = (first + last) / 2
-                if (tinh(mid)):
-                    first = mid
-                else:
-                    last = mid
-            return (current + min(limit, max(-first - energy[0], 0)) * charging_efficiency) / capacity
-
-        if ((energy[0] > 0) & (solution.get_value(charge[0]) <= 0)):
-            n = 0
-            first = dis_limit
-            mid = 0
-            sum_discharge = solution.get_value(dis_charge[0])
-            last = energy[0]
-            for n in range(1, number_step):
-                if ((energy[n] < 0) | (solution.get_value(charge[n]) > 0) | (price_sell[n] != price_sell[n - 1]) | (
-                        price_buy[n] != price_buy[n - 1])):
-                    break
-                last = max(last, energy[n])
-                sum_discharge += solution.get_value(dis_charge[n])
-            if (sum_discharge >= 0.):
-                return solution.get_value(battery_power[1]) / capacity
-
-            def tinh2(X):
-                res = 0
-                for i in range(n):
-                    res += max(dis_limit, min(X - energy[i], 0))
-                if (res <= sum_discharge): return True
-                return False
-
-            last += 2
-
-            # binary search
-            while (last - first > 1):
-                mid = (first + last) / 2
-                if (tinh2(mid)):
-                    first = mid
-                else:
-                    last = mid
-            return (current + max(dis_limit, min(first - energy[0], 0)) * discharging_efficiency) / capacity
         return solution.get_value(battery_power[1]) / capacity
 
 
 
-class BatteryContoller(object):
+class BatteryContoller_pupl(object):
+
     step = 960
 
     def propose_state_of_charge(self,
@@ -334,8 +268,8 @@ class BatteryContoller(object):
 
 
         model.solve(GLPK(msg=0))
-        return battery_power[1].value() / capacity
 
+        return battery_power[1].value() / capacity
 
 class Simulation(object):
     """ Handles running a simulation.
@@ -525,4 +459,4 @@ if __name__ == '__main__':
 # write all results out to a file
     results_df = pd.DataFrame(results).set_index('run_id')
     results_df = results_df[['site_id', 'battery_id', 'period_id', 'money_spent', 'money_no_batt', 'score']]
-    results_df.to_csv('results_GLPK_S.csv')
+    results_df.to_csv('results.csv')
